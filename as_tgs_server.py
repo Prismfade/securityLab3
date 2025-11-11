@@ -1,7 +1,9 @@
 import socket
 import json
+import time
+import os
 from datetime import datetime
-from cryptography.fernet import Fernet
+from Crypto.Cipher import DES
 
 class AS_TGS_Server:
     def __init__(self):
@@ -9,113 +11,146 @@ class AS_TGS_Server:
         self.host = 'localhost'
         self.port = 9002
         
-        # TGS ID
+        # Pre-defined keys (8 bytes for DES)
+        self.Kc = b'KC_KEY12'  # Key between Client and AS
+        self.Ktgs = b'KT_KEY12'  # Key between AS and TGS
+        
+        self.IDc = "CIS3319USERID"
         self.IDtgs = "CIS3319TGSID"
         
-        # Generate key for TGS
-        self.tgs_key = Fernet.generate_key()
-        self.tgs_cipher = Fernet(self.tgs_key)
-        
-        # Client database (in real system, this would be securely stored)
-        self.client_keys = {
-            "CIS3319USERID": Fernet.generate_key()  # Client's key (in real system, derived from password)
-        }
-        
+        unix_epoch_time = int(time.time())
+        print(f"Current Unix Epoch Time: {unix_epoch_time}")
+
         # Initialize server socket
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
     
-    def verify_timestamp(self, timestamp):
-        # Check if timestamp is within acceptable range (e.g., 5 minutes)
-        current_time = datetime.now().timestamp()
-        return abs(current_time - timestamp) <= 300  # 5 minutes
+
+    def generate_Ticket(self, IDc, IDtgs, client_addr):
+        import random
+        
+        # Generate session key Kc,tgs (16 bytes as specified)
+        Kc_tgs = bytes([random.randint(0, 255) for _ in range(16)])
+        
+        # Create ticket timestamp and lifetime
+        TS2 = int(time.time())
+        lifetime = 60  # Ticket valid for 60 seconds
+        
+        # Create the ticket structure to send back to client
+        ticket_data = {
+            "IDc": IDc,
+            "IDtgs": IDtgs,
+            "TS2": TS2,
+            "lifetime": lifetime,
+            "ADc": client_addr,  # Client network address
+            "Kc_tgs": Kc_tgs.hex()  # Session key (converted to hex for JSON)
+        }
+        
+        # Encrypt the ticket with Ktgs (server-to-server key)
+        cipher = DES.new(self.Ktgs, DES.MODE_ECB)
+        ticket_json = json.dumps(ticket_data)
+        
+        # Pad plaintext to multiple of 8 bytes (DES block size)
+        plaintext = ticket_json.encode()
+        padding_length = 8 - (len(plaintext) % 8)
+        plaintext += bytes([padding_length] * padding_length)
+        
+        encrypted_ticket = cipher.encrypt(plaintext)
+        
+        return encrypted_ticket, Kc_tgs
+
+    def ticket_exchange(Idv, ticket, authenticator):
+        ticket_data = {
+            "Kc_tgs": 
+
+        }
+        pass
     
-    def handle_client_request(self, client_socket, client_address):
+    def handle_client_ASC(self, client_socket):
         try:
-            # Receive client's request
-            request_data = client_socket.recv(4096)
+            # Get client address in format "{'localhost':{port}}"
+            client_addr = f"{{'localhost':{self.port}}}"
+            
+            # Receive the request from the client
+            request_data = client_socket.recv(1024)
             request = json.loads(request_data.decode())
             
-            # Extract request components
-            client_id = request.get('IDc')
-            requested_tgs = request.get('IDtgs')
-            timestamp = request.get('TS1')
+            print(f"\nReceived request from {client_addr}:")
+            print(f"  IDc: {request.get('IDc')}")
+            print(f"  IDtgs: {request.get('IDtgs')}")
+            print(f"  TS1: {request.get('TS1')}")
             
-            print(f"Received request from client {client_id}")
-            print(f"Requested TGS: {requested_tgs}")
-            print(f"Timestamp: {datetime.fromtimestamp(timestamp)}")
+            # Extract request data
+            IDc = request.get('IDc')
+            IDtgs = request.get('IDtgs')
+            TS1 = request.get('TS1')
             
-            # Verify client ID exists
-            if client_id not in self.client_keys:
-                error_msg = {"error": "Unknown client"}
-                client_socket.send(json.dumps(error_msg).encode())
-                return
-                
-            # Verify TGS ID
-            if requested_tgs != self.IDtgs:
-                error_msg = {"error": "Invalid TGS ID"}
-                client_socket.send(json.dumps(error_msg).encode())
-                return
-                
-            # Verify timestamp freshness
-            if not self.verify_timestamp(timestamp):
-                error_msg = {"error": "Timestamp expired"}
-                client_socket.send(json.dumps(error_msg).encode())
-                return
+            # Generate ticket and session key
+            encrypted_ticket, Kc_tgs = self.generate_Ticket(IDc, IDtgs, client_addr)
             
-            # Generate session key for client-TGS communication
-            client_tgs_session_key = Fernet.generate_key()
-            
-            # Create ticket for TGS
-            ticket_tgs = {
-                "client_id": client_id,
-                "tgs_id": self.IDtgs,
-                "timestamp": datetime.now().timestamp(),
-                "lifetime": 3600,  # 1 hour lifetime
-                "client_tgs_session_key": client_tgs_session_key.decode()
+            # Prep parameters to send back to client
+            response_data = {
+                "ticket": encrypted_ticket.hex(),  # Encrypted ticket (hex for JSON)
+                "Kc_tgs": Kc_tgs.hex()  # Session key for client-TGS communication
             }
             
-            # Encrypt ticket with TGS's key
-            encrypted_ticket = self.tgs_cipher.encrypt(json.dumps(ticket_tgs).encode())
+            # Encrypt the session key with Kc (client's key)
+            cipher = DES.new(self.Kc, DES.MODE_ECB)
+            response_json = json.dumps(response_data)
+            plaintext = response_json.encode()
             
-            # Create message for client, encrypted with client's key
-            client_cipher = Fernet(self.client_keys[client_id])
-            client_message = {
-                "client_tgs_session_key": client_tgs_session_key.decode(),
-                "IDtgs": self.IDtgs,
-                "timestamp": datetime.now().timestamp(),
-                "lifetime": 3600,
-                "ticket_tgs": encrypted_ticket.decode()
-            }
+            # Pad plaintext to multiple of 8 bytes (DES block size)
+            padding_length = 8 - (len(plaintext) % 8)
+            plaintext += bytes([padding_length] * padding_length)
             
-            # Encrypt client message
-            encrypted_client_message = client_cipher.encrypt(json.dumps(client_message).encode())
+            encrypted_response = cipher.encrypt(plaintext)
             
-            # Send response to client
-            client_socket.send(encrypted_client_message)
-            print(f"Sent encrypted response to client {client_id}")
+            # Send the response to the client
+            client_socket.send(encrypted_response)
+            print(f"Sent ticket and session key to {client_addr}")
             
         except json.JSONDecodeError:
-            error_msg = {"error": "Invalid request format"}
-            client_socket.send(json.dumps(error_msg).encode())
+            print("Error: Received data is not valid JSON")
         except Exception as e:
-            error_msg = {"error": f"Server error: {str(e)}"}
-            client_socket.send(json.dumps(error_msg).encode())
+            print(f"Error handling client: {e}")
+        finally:
+            client_socket.close()
+   
+
+    def handle_client_TGSC(self, client_socket):
+        try:
+            # Get client address in format "{'localhost':{port}}"
+            client_addr = f"{{'localhost':{self.port}}}"
+            request_data = client_socket.recv(1024)
+            request = json.loads(request_data.decode())
+
+            print(f"\nReceived request from {client_addr}:")
+            print(f"  IDv: {request.get('IDv')}")
+            print(f"  Ticket: {request.get('ticket')}")
+            print(f"  Authenticator: {request.get('authenticator')}")
+
+            IDv = request.get('IDv')
+            ticket = request.get('ticket')
+            authenticator = request.get('authenticator')
+
+            
+        except Exception as e:
+            print(f"Error handling TGS client: {e}")
+        finally:
+            client_socket.close()
     
     def start(self):
         self.server_socket.listen(5)
-        print(f"AS-TGS Server started on {self.host}:{self.port}")
+        print(f"AS/TGS Server listening on {self.host}:{self.port}")
         
-        try:
-            while True:
-                client_socket, client_address = self.server_socket.accept()
-                print(f"Connection from {client_address}")
-                try:
-                    self.handle_client_request(client_socket, client_address)
-                finally:
-                    client_socket.close()
-        finally:
-            self.server_socket.close()
+        while True:
+            client_socket, addr = self.server_socket.accept()
+            print(f"Connection from {addr} has been established.")
+            self.handle_client_ASC(client_socket)
+            client_socket, addr = self.server_socket.accept()
+            print(f"Connection from {addr} has been established.")
+            self.handle_client_ASC(client_socket)
+
 
 if __name__ == "__main__":
     server = AS_TGS_Server()
