@@ -1,8 +1,6 @@
-
 import socket
 import json
 import time
-from datetime import datetime
 from Crypto.Cipher import DES
 
 class Client:
@@ -22,98 +20,84 @@ class Client:
     def recv(self, buffer_size=None) -> bytes:
         if buffer_size is None:
             buffer_size = self.buffer_size
-        msg_bytes = self.s.recv(self.buffer_size)
-
+        msg_bytes = self.s.recv(buffer_size)
         return msg_bytes
 
     def close(self):
         self.s.close()
 
 
-if __name__ == '__main__':
-    # Connect to Authentication Server (AS)
-    client = Client('localhost', 9002)  # AS server port
-    
-    # Define client and TGS IDs as specified
+def unpad(data: bytes) -> bytes:
+    pad_len = data[-1]
+    return data[:-pad_len]
+
+
+if __name__ == "__main__":
     IDc = "CIS3319USERID"
     IDtgs = "CIS3319TGSID"
     IDv = "CIS3319SERVERID"
-    lifetime = 60 # 60 seconds
-    
-    try:
-        # Create timestamp for request freshness (Unix/Epoch time in seconds)
-        timestamp = int(time.time())  # Current time in seconds since epoch
-        
-        # Create the request message for AS
-        as_request = {
-            "IDc": IDc,           # Client ID
-            "IDtgs": IDtgs,       # ID of the TGS we want to access
-            "TS1": timestamp      # Timestamp for freshness (Unix time)
+
+    #  1: AS REQUEST
+    print("\n=== PHASE 1: Requesting TGS Ticket from AS ===")
+
+    client = Client("localhost", 9009)
+
+    TS1 = int(time.time())
+    as_request = {
+        "IDc": IDc,
+        "IDtgs": IDtgs,
+        "TS1": TS1
+    }
+
+    client.send(json.dumps(as_request).encode())
+    print("Sent AS request:", as_request)
+
+    encrypted_response = client.recv(4096)
+    cipher = DES.new(client.Kc, DES.MODE_ECB)
+    decrypted = cipher.decrypt(encrypted_response)
+    decrypted = unpad(decrypted)
+
+    as_reply = json.loads(decrypted.decode())
+    ticket_tgs_hex = as_reply["ticket"]
+    print("Received Tickettgs (hex):", ticket_tgs_hex[:80], "...")
+
+    # Important: Close AS connection
+    client.close()
+
+    #  2: TGS REQUEST
+    print("\n=== PHASE 2: Requesting Ticket_v from TGS ===")
+
+    client = Client("localhost", 9009)
+
+    tgs_request = {
+        "IDv": IDv,
+        "Tickettgs": ticket_tgs_hex,
+        "authenticator": {
+            "IDc": IDc,
+            "ADc": "{'localhost':9001}",
+            "TS3": int(time.time())
         }
+    }
 
-        # Send the request to AS
-        client.send(json.dumps(as_request).encode())
-        print(f"Sent AS request: {as_request}")
-        
-        # Receive the response from the AS server
-        encrypted_response = client.recv()
-        print(f"\nReceived encrypted response from AS")
-        
-        # Decrypt the response using Kc
-        cipher = DES.new(client.Kc, DES.MODE_ECB)
-        decrypted_plaintext = cipher.decrypt(encrypted_response)
-        
-        # Remove padding that was added during encryption - found solution to remove this padding online
-        padding_length = decrypted_plaintext[-1]
-        decrypted_plaintext = decrypted_plaintext[:-padding_length]
-        
-        # Parse the JSON response
-        response = json.loads(decrypted_plaintext.decode())
+    client.send(json.dumps(tgs_request).encode())
+    print("Sent TGS request:", tgs_request)
 
-        print(f"\nDecrypted outer response:")
-        print(f"  Ticket for TGS (hex): {response.get('ticket_tgs')[:50]}...")
-        print(f"  Encrypted inner payload (hex): {response.get('enc_with_kc_tgs')[:50]}...")
-        print(f"  Session Key Kc,tgs (hex): {response.get('Kc_tgs')}")
+    tgs_reply_bytes = client.recv(4096)
+    tgs_reply = json.loads(tgs_reply_bytes.decode())
 
-        # Store the session key for later use with TGS
-        Kc_tgs = bytes.fromhex(response.get('Kc_tgs'))
-        ticket = bytes.fromhex(response.get('ticket_tgs'))
+    print("\n--- TGS Response ---")
+    print("Ticketv:", tgs_reply["Ticketv"][:80], "...")
+    print("Kcv:", tgs_reply["Kcv"][:80], "...")
+    print("IDv:", tgs_reply["IDv"])
+    print("TS4:", tgs_reply["TS4"])
 
-        # Decrypt the inner payload using Kc_tgs (use first 8 bytes for DES)
-        encrypted_inner = bytes.fromhex(response.get('enc_with_kc_tgs'))
-        cipher_inner = DES.new(Kc_tgs[:8], DES.MODE_ECB)
-        decrypted_inner = cipher_inner.decrypt(encrypted_inner)
-        padding_len_inner = decrypted_inner[-1]
-        decrypted_inner = decrypted_inner[:-padding_len_inner]
-        inner = json.loads(decrypted_inner.decode())
-
-        print(f"\nDecrypted inner payload:")
-        print(f"  Kc_v (hex): {inner.get('Kc_v')}")
-        print(f"  Ticket_v (hex): {inner.get('ticket_v')[:50]}...")
-        print(f"  IDv: {inner.get('IDv')}")
-        print(f"  TS4: {inner.get('TS4')}")
-
-        Kc_v = bytes.fromhex(inner.get('Kc_v'))
-        ticket_v = bytes.fromhex(inner.get('ticket_v'))
-
-        print(f"\nReceived session keys and tickets successfully.")
-
-        as_request = {
-            "IDv": IDv,           # Client IDv
-            "ticket": ticket.hex(), # Ticket for TGS (converted to hex for JSON)
-            "authenticator": {
-                "IDc": IDc,
-                "TS3": int(time.time())
-            }
+    cv_request = {
+        "Ticketv": tgs_reply["Ticketv"],
+        "authenticator": {
+            "IDc": IDc,
+            "ADc": "{'localhost':9001}",
+            "TS5": int(time.time())
         }
+    }
 
-        # Send the request to TGS
-        client.send(json.dumps(as_request).encode())
-        print(f"\nSent TGS request: {as_request}")
-    except json.JSONDecodeError as e:
-        print(f"Error decoding response: {e}")
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        client.close()
-        print("\nConnection closed")
+    client.close()
