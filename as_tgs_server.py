@@ -11,9 +11,9 @@ class AS_TGS_Server:
         self.host = 'localhost'
         self.port = 9009
         
-        # Pre-shared DES keys (must be exactly 8 bytes for DES)
-        self.Kc = b'KC_KEY12'   # key shared between Client and AS (8 bytes)
-        self.Ktgs = b'KT_KEY12' # key shared between AS and TGS (8 bytes)
+        # made some des keys
+        self.Kc = b'KC_KEY12' 
+        self.Ktgs = b'KT_KEY12'
 
         self.IDc = "CIS3319USERID"
         self.IDtgs = "CIS3319TGSID"
@@ -26,12 +26,12 @@ class AS_TGS_Server:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
 
-    # ---------- AS side: create Tickettgs ----------
+    # AS side: create Tickettgs
     def TGS_generate_Ticket(self, IDc, IDtgs, client_addr):
-        # Generate session key Kc_tgs (16 bytes as required)
-        Kc_tgs = os.urandom(16)  # 16 bytes session key
+        # Generate kc-tgs
+        Kc_tgs = os.urandom(16)  
 
-        # Encrypt the session key inside the ticket as well
+        # encrypt the key to esend
         enc_Kc_tgs = self.DES_encrypt(self.Ktgs, Kc_tgs)
 
         # Build ticket fields: Ktgs, kctgs, IDc, ADc, IDtgs, TS2, Lifetime2
@@ -106,19 +106,18 @@ class AS_TGS_Server:
         return encrypted_ticket, Kc_v
 
     def handle_client_TGSClient(self, client_socket, request):
-        """Request from client to TGS (for Ticketv)."""
         try:
             print("Raw TGS request parsed:", request)
-
+            # initialize variables from request sent from client
             IDv = request.get('IDv')
             Tickettgs_hex = request.get('Tickettgs')
-            authenticator = request.get('authenticator')  # you can verify later
+            authenticator = request.get('authenticator')
 
             if Tickettgs_hex is None or IDv is None:
                 print("Missing IDv or Tickettgs in TGS request")
                 return
 
-            # Decrypt Tickettgs
+            # decrypt ticket tgs
             ticket_bytes = bytes.fromhex(Tickettgs_hex)
             ticket_plain = self.DES_decrypt(self.Ktgs, ticket_bytes)
             print("Decrypted Tickettgs JSON:", ticket_plain.decode())
@@ -133,7 +132,7 @@ class AS_TGS_Server:
             encrypted_ticketv, Kc_v = self.generate_Ticketv(IDc, IDv, ADc, None)
 
             response = {
-                "Kcv": Kc_v.hex(),          # session key for client–server
+                "Kcv": Kc_v.hex(),
                 "IDv": IDv,
                 "TS4": int(time.time()),
                 "Ticketv": encrypted_ticketv.hex()
@@ -152,7 +151,7 @@ class AS_TGS_Server:
             except Exception:
                 pass
 
-    # ---------- DES helpers ----------
+    # functions to encrypt and decrypt DES, had to find the function online to do padding
     def DES_encrypt(self, key: bytes, data: bytes) -> bytes:
         des = DES.new(key, DES.MODE_ECB)
         pad_len = 8 - (len(data) % 8)
@@ -170,7 +169,6 @@ class AS_TGS_Server:
             return plaintext
         return plaintext[:-pad_len]
 
-    # ---------- Main loop ----------
     def start(self):
         self.server_socket.listen(5)
         print(f"AS/TGS Server listening on {self.host}:{self.port}")
@@ -195,7 +193,6 @@ class AS_TGS_Server:
                     client_socket.close()
                     continue
 
-                # Decide whether this is AS or TGS based on fields
                 if "IDc" in request and "IDtgs" in request and "TS1" in request:
                     # AS phase
                     self.handle_client_ASC(client_socket, request)
